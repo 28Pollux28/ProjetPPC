@@ -18,12 +18,12 @@ Différents processus gèrent les maisons, le marché, la météo et les événe
 
 ### Prérequis
 * python3
-* pip3
+* pip
 
 ### Installation des dépendances
 Pour installer les dépendances, lancer la commande suivante :
 ```bash
-pip3 install -r requirements.txt
+pip install -r requirements.txt
 ```
 
 ---
