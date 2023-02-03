@@ -1,36 +1,31 @@
 import concurrent.futures
-import datetime
 import errno
-import math
 import multiprocessing as mp
 import os
+import random
 import select
 import signal
-import random
 import socket
 import sys
-import threading
 import time
 from typing import *
 
-import numpy as np
 import sysv_ipc
-from matplotlib import pyplot as plt, animation
-from matplotlib.colors import ListedColormap
+from matplotlib import pyplot as plt
 from scipy.stats import norm
 
 from utils.utils import convertArrayToBinary, convertDecimalToBinary
 
 
 class ExternalEvent:
-    CENTRALE_EXPLOSION = {'id': 0, 'probability': 0.005, 'durationMax': 7, 'betaMax': 0.5,
+    CENTRALE_EXPLOSION = {'id': 0, 'probability': 0.05, 'durationMax': 7, 'betaMax': 0.5,
                           'name': "Explosion d'une centrale"}
     FUEL_SHORTAGE = {'id': 1, 'probability': 0.01, 'durationMax': 2, 'betaMax': 0.4, 'name': "Pénurie de carburant"}
-    # STRIKE = {'id': 2, 'probability': 0.1, 'durationMax': 3, 'betaMax': 0.2, 'name': "Grèves"}
-    ECONOMIC_CRISIS = {'id': 3, 'probability': 0.002, 'durationMax': 5, 'betaMax': 0.6, 'name': "Crise économique"}
-    WAR = {'id': 4, 'probability': 0.001, 'durationMax': 10, 'betaMax': 0.8, 'name': "Guerre"}
+    STRIKE = {'id': 2, 'probability': 0.1, 'durationMax': 3, 'betaMax': 0.2, 'name': "Grèves"}
+    ECONOMIC_CRISIS = {'id': 3, 'probability': 0.02, 'durationMax': 5, 'betaMax': 0.6, 'name': "Crise économique"}
+    WAR = {'id': 4, 'probability': 0.01, 'durationMax': 10, 'betaMax': 0.8, 'name': "Guerre"}
 
-    EVENTS = [CENTRALE_EXPLOSION, FUEL_SHORTAGE, ECONOMIC_CRISIS, WAR]
+    EVENTS = [CENTRALE_EXPLOSION, FUEL_SHORTAGE, STRIKE, ECONOMIC_CRISIS, WAR]
 
     def __init__(self, id, duration, beta, eventNumber):
         self.id = id
@@ -43,7 +38,7 @@ class ExternalEvent:
 class Home(mp.Process):
     def __init__(self, id: int, start_new_day_barrier: mp.Barrier, home_barrier: mp.Barrier, sharedWH, consumerKey: int,
                  producerKey: int, transactionKey: int, production: int, consumption: int, producerType: int,
-                 maxDays: int, marketBarrier: mp.Barrier, logLock):
+                 maxDays: int, marketBarrier: mp.Barrier, logLock, log):
         super().__init__()
         self.id = id
         self.name = "Home {}".format(id)
@@ -62,23 +57,25 @@ class Home(mp.Process):
         self.logLock = logLock
         self.host = "localhost"
         self.port = 6226
+        self.logB = log
 
     def log(self, message: str):
-        # self.logLock.acquire()
-        # print("Home {} : {}".format(self.id, message))
-        # self.logLock.release()
-        pass
+        if self.logB:
+            self.logLock.acquire()
+            print("Home {} : {}".format(self.id, message))
+            self.logLock.release()
 
     def logCarac(self):
-        # self.logLock.acquire()
-        # print("Home {} : pid = {}, production = {}, consumption = {}, producerType = {}, energy = {}".format(self.id,
-        #                                                                                                      os.getpid(),
-        #                                                                                                      self.production,
-        #                                                                                                      self.consumption,
-        #                                                                                                      self.producerType,
-        #                                                                                                      self.energy))
-        # self.logLock.release()
-        pass
+        if self.logB:
+            self.logLock.acquire()
+            print(
+                "Home {} : pid = {}, production = {}, consumption = {}, producerType = {}, energy = {}".format(self.id,
+                                                                                                               os.getpid(),
+                                                                                                               self.production,
+                                                                                                               self.consumption,
+                                                                                                               self.producerType,
+                                                                                                               self.energy))
+            self.logLock.release()
 
     def sellToHomes(self, consumerMQ, producerMQ, transactionMQ):
         while self.energy > 0 and (consumerMQ.current_messages > 0 or consumerMQ.last_send_time > time.time() - 1 or
@@ -102,13 +99,11 @@ class Home(mp.Process):
     def buyFromHomes(self, consumerMQ, producerMQ, transactionMQ):
         while self.energy < 0 and producerMQ.current_messages > 0:
             try:
-                # print("Home {} is waiting for energy".format(self.id))
                 message, mType = transactionMQ.receive(block=False, type=self.pid)
                 msg = message.decode()
                 energyReceived = int(msg)
                 self.energy += energyReceived
                 self.log("Home {} received {} energy".format(self.id, energyReceived))
-                # print("received energy :" + str(energyReceived))
                 if self.energy < 0:
                     consumerMQ.send((str(self.pid) + "," + str(abs(self.energy))).encode(), type=1)
             except sysv_ipc.BusyError:
@@ -164,8 +159,8 @@ class Home(mp.Process):
             transactionMQ = sysv_ipc.MessageQueue(self.transactionKey, sysv_ipc.IPC_CREX)
         except sysv_ipc.ExistentialError:
             transactionMQ = sysv_ipc.MessageQueue(self.transactionKey)
-        self.emptyQueues(consumerMQ, producerMQ, transactionMQ)
-
+        if self.id == 0:
+            self.emptyQueues(consumerMQ, producerMQ, transactionMQ)
         while day < self.maxDays:
             self.start_new_day_barrier.wait()
             # wait for weather to be calculated
@@ -218,32 +213,6 @@ class Home(mp.Process):
             producerMQ.remove()
             transactionMQ.remove()
 
-            # transactionMQ.send("".encode(), type=1)
-            # transactionMQ.receive(type=1)
-            # # print("Home {} is starting a new day".format(self.id))
-            #
-            # # Calculate Production vs Consumption
-            #
-            # print("Home {} has {} energy".format(self.id, energy))
-            # if energy > 0:
-            #     if self.producerType == 0:
-            #         # Sell all to market
-            #         self.sellMarket(energy)
-            #     elif self.producerType == 1:
-            #         # Sell to homes and then to market
-            #         energyLeft = self.sellToHomes(consumerMQ, transactionMQ, energy)
-            #         if energyLeft > 0:
-            #             self.sellMarket(energyLeft)
-            #
-            #     else:
-            #         # Sell all to homes and nether to market
-            #         self.sellToHomes(consumerMQ, transactionMQ, energy)
-            # else:
-            #     consumerMQ.send((str(os.getpid()) + "," + str(abs(self.energy))).encode(), type=1)
-            #     self.buyFromHomes(consumerMQ, transactionMQ)
-            #     if self.energy < 0:
-            #         self.buyFromMarket()
-
     def emptyQueues(self, consumerMQ, producerMQ, transactionMQ):
         for i in range(transactionMQ.current_messages):
             transactionMQ.receive()
@@ -262,7 +231,7 @@ class Home(mp.Process):
 class Market(mp.Process):
     def __init__(self, start_new_day_barrier, sharedWH, startPrice: float, gamma: float, demandAlpha: float,
                  internalFactorsAlpha: List[float], externalEvents: List[ExternalEvent], maxDays: int,
-                 marketBarrier: mp.Barrier, logLock: mp.Lock, marketDataBarrier: mp.Barrier, marketTimeChildPipe):
+                 marketBarrier: mp.Barrier, logLock: mp.Lock, marketDataBarrier: mp.Barrier, marketTimeChildPipe, log):
         super().__init__()
         self.serve = None
         self.external: External = None
@@ -288,11 +257,12 @@ class Market(mp.Process):
         self.marketDataBarrier = marketDataBarrier
         self.marketTimeChildPipe = marketTimeChildPipe
         self.eventNumber = 0
+        self.logB = log
 
     def log(self, msg):
-        pass
-        # with self.logLock:
-        #     print("Market: {}".format(msg))
+        if self.logB:
+            with self.logLock:
+                print("Market: {}".format(msg))
 
     def calcContributionFactors(self):
         total = 0
@@ -301,9 +271,9 @@ class Market(mp.Process):
             extFact.duration -= 1
         # Temperature
         if self.sharedWH[0] > 25:
-            total += abs(25 - self.sharedWH[0])/200 * self.internalFactorsAlpha[0]
+            total += abs(25 - self.sharedWH[0]) / 200 * self.internalFactorsAlpha[0]
         elif self.sharedWH[0] < 10:
-            total += abs(10 - self.sharedWH[0])/200 * self.internalFactorsAlpha[0]
+            total += abs(10 - self.sharedWH[0]) / 200 * self.internalFactorsAlpha[0]
         return total
 
     def updateExternalEvents(self):
@@ -315,9 +285,9 @@ class Market(mp.Process):
         self.price = self.gamma * self.price + self.calcContributionFactors() + self.demand * self.demandAlpha
 
     def calcDemand(self):
-        self.demand -= self.dayResults / 20
-        self.demand = 0.7 + 0.2 * self.demand
-        # self.demand *= abs(2-self.demand)
+        self.demand -= self.dayResults / 1000
+        # self.demand = 0.7 + 0.2 * self.demand
+        self.demand *= abs(2 - self.demand)
         if self.demand < 0:
             self.demand = 0
 
@@ -377,7 +347,7 @@ class Market(mp.Process):
         signal.signal(signal.SIGALRM, self.handler)
         signal.signal(signal.SIGUSR1, self.handler)
         signal.signal(signal.SIGUSR2, self.handler)
-        self.external = External(self.start_new_day_barrier, self.maxDays, self.externalBarrier, self.pid)
+        self.external = External(self.start_new_day_barrier, self.maxDays, self.externalBarrier, self.pid, self.logB)
         self.external.start()
         while self.day < self.maxDays:
             self.start_new_day_barrier.wait()
@@ -404,7 +374,6 @@ class Market(mp.Process):
                         print("Port is already in use")
                         sys.exit()
                     else:
-                        # something else raised the socket.error exception
                         print(e)
                 server_socket.listen(4)
                 self.serve = True
@@ -426,7 +395,7 @@ class Market(mp.Process):
 
 
 class Weather(mp.Process):
-    def __init__(self, start_new_day_barrier, sharedWH: mp.Array, maxDays, logLock):
+    def __init__(self, start_new_day_barrier, sharedWH: mp.Array, maxDays, logLock, log):
         super().__init__()
         self.start_new_day_barrier = start_new_day_barrier
         self.sharedWH: mp.Array = sharedWH
@@ -436,12 +405,13 @@ class Weather(mp.Process):
         self.season = 0
         self.meanTemp = [15, 25, 10, 0]
         self.sharedWH[0] = self.meanTemp[0]
+        self.logB = log
 
     def log(self, msg):
-        pass
-        # self.logLock.acquire()
-        # print("Weather: {}".format(msg))
-        # self.logLock.release()
+        if self.logB:
+            self.logLock.acquire()
+            print("Weather: {}".format(msg))
+            self.logLock.release()
 
     def updateSeason(self):
         if self.day % 10 == 0 and self.day != 0:
@@ -467,17 +437,18 @@ class Weather(mp.Process):
 
 
 class External(mp.Process):
-    def __init__(self, start_new_day_barrier: mp.Barrier, maxDays: int, externalBarrier: mp.Barrier, marketPID: int):
+    def __init__(self, start_new_day_barrier: mp.Barrier, maxDays: int, externalBarrier: mp.Barrier, marketPID: int, log):
         super().__init__()
         self.start_new_day_barrier: mp.Barrier = start_new_day_barrier
         self.ppid = marketPID
         self.day = 0
         self.maxDays = maxDays
         self.externalBarrier: mp.Barrier = externalBarrier
+        self.logB = log
 
     def log(self, msg):
-        # print("External: {}".format(msg))
-        pass
+        if self.logB:
+            print("External: {}".format(msg))
 
     def sendSignal(self, signum):
         os.kill(self.ppid, signum)
@@ -521,7 +492,7 @@ class External(mp.Process):
 
 
 class Time(mp.Process):
-    def __init__(self, nHomes, maxDays):
+    def __init__(self, nHomes, maxDays, log):
         super().__init__()
         self.weatherLine = None
         self.priceline = None
@@ -535,39 +506,43 @@ class Time(mp.Process):
         self.start_new_day_barrier = mp.Barrier(nHomes + 4)
         self.marketBarrier = mp.Barrier(nHomes + 1)
         self.logLock = mp.Lock()
+        self.log = log
         self.marketDataBarrier = mp.Barrier(2)
         self.marketTimeParentPipe, self.marketTimeChildPipe = mp.Pipe()
-        self.weatherColors = [["Spring", 'springgreen'], ["Summer", 'orange'], ["Autumn", 'peru'], ["Winter", 'lightskyblue']]
+        self.weatherColors = [["Spring", 'springgreen'], ["Summer", 'orange'], ["Autumn", 'peru'],
+                              ["Winter", 'lightskyblue']]
         self.weatherNum = 0
 
     def startNewDay(self):
         self.day += 1
-        # self.logLock.acquire()
-        # print("Good Morning, it is day : " + str(self.day))
-        # self.logLock.release()
+        if self.log:
+            self.logLock.acquire()
+            print("Good Morning, it is day : " + str(self.day))
+            self.logLock.release()
 
     def createWeather(self):
-        self.weather = Weather(self.start_new_day_barrier, self.sharedWH, self.maxDays, self.logLock)
+        self.weather = Weather(self.start_new_day_barrier, self.sharedWH, self.maxDays, self.logLock, self.log)
         self.weather.start()
 
     def createHomes(self):
         home_barrier = mp.Barrier(self.nHomes)
         self.homes = [
             Home(i, self.start_new_day_barrier, home_barrier, self.sharedWH, 128, 192, 256, random.randint(50, 100),
-                 random.randint(50, 100), random.randint(0, 2), self.maxDays, self.marketBarrier, self.logLock) for i in
+                 random.randint(50, 100), random.randint(0, 2), self.maxDays, self.marketBarrier, self.logLock,
+                 self.log) for i in
             range(self.nHomes)]
         for h in self.homes:
             print("starting home " + str(h.id) + "...")
             h.start()
 
     def createMarket(self):
-        self.market = Market(self.start_new_day_barrier, self.sharedWH, 0.45, 0.8, 0.1, [0.3], [], self.maxDays,
-                             self.marketBarrier, self.logLock, self.marketDataBarrier, self.marketTimeChildPipe)
+        self.market = Market(self.start_new_day_barrier, self.sharedWH, 0.45, 0.8, 0.1, [0.8], [], self.maxDays,
+                             self.marketBarrier, self.logLock, self.marketDataBarrier, self.marketTimeChildPipe,
+                             self.log)
         print("market starting...")
         self.market.start()
 
     def initPlot(self):
-        i = len(ExternalEvent.EVENTS)
         self.pricePlt, (self.pricePlot, self.weatherPlot) = plt.subplots(2, sharex=True)
 
         # self.pricePlot.set_ylabel('Energy Price €/kWh')
@@ -577,8 +552,6 @@ class Time(mp.Process):
         self.weatherPlot.set_title('Weather')
         self.weatherPlot.set_xlabel('Days')
         self.weatherPlot.set_ylabel('Temperature (°C)')
-        # self.weatherPlt, self.weatherPlot = plt.subplots(1)
-        # self.eventPlt, self.eventPlots = plt.subplots(i // 2, i // 2)
         plt.tight_layout(pad=3)
         self.plotsX = []
         self.plotsYs = []
@@ -586,100 +559,45 @@ class Time(mp.Process):
         self.plotsYs.append([])
         self.plotsYs.append([])
         plt.pause(0.01)
-        plt.ion()
-        # self.anim = animation.FuncAnimation(self.marketPlt, self.animate, interval=100)
-        # self.animate()
 
     def animate(self):
         self.plotsX.append(self.day)
         data = self.marketTimeParentPipe.recv()
         events = data[3]
 
-
-
-
         self.plotsYs[0].append(data[0])
         self.plotsYs[2].append(data[2])
         self.plotsYs[1].append(self.sharedWH[0])
         if not self.priceline:
-            # self.pricePlot.clear()
-            self.priceline, = self.pricePlot.plot(self.plotsX, self.plotsYs[0],color='red', label='Price')
+            self.priceline, = self.pricePlot.plot(self.plotsX, self.plotsYs[0], color='red', label='Price')
             self.demandPlot.clear()
-            self.demandLine,  = self.demandPlot.plot(self.plotsX, self.plotsYs[2], color='blue', label='Demand')
+            self.demandLine, = self.demandPlot.plot(self.plotsX, self.plotsYs[2], color='blue', label='Demand')
             self.demandFill = self.demandPlot.fill_between(self.plotsX, self.plotsYs[2], 0, color='blue', alpha=0.3)
             self.pricePlot.legend(loc='upper left')
             self.demandPlot.legend(loc='upper right')
         else:
             self.priceline.set_data(self.plotsX, self.plotsYs[0])
-            # self.demandPlot.clear()
             self.demandLine.set_data(self.plotsX, self.plotsYs[2])
             self.demandFill.remove()
             self.demandFill = self.demandPlot.fill_between(self.plotsX, self.plotsYs[2], 0, color='blue', alpha=0.3)
 
-        self.pricePlot.set_ylim(0, max(self.plotsYs[0])+1)
-        self.pricePlot.set_xlim(max(0, self.day-100), self.day+1)
-        self.demandPlot.set_ylim(0, max(self.plotsYs[2])+1)
-        self.demandPlot.set_xlim(max(0, self.day-100), self.day+1)
+        self.pricePlot.set_ylim(0, max(self.plotsYs[0]) + 1)
+        self.pricePlot.set_xlim(max(0, self.day - 100), self.day + 1)
+        self.demandPlot.set_ylim(0, max(self.plotsYs[2]) + 1)
+        self.demandPlot.set_xlim(max(0, self.day - 100), self.day + 1)
         if not self.weatherLine:
             self.weatherLine, = self.weatherPlot.plot(self.plotsX, self.plotsYs[1])
         else:
             self.weatherLine.set_data(self.plotsX, self.plotsYs[1])
         if self.day % 10 == 0:
             if self.day != 0:
-                self.weatherNum = (self.weatherNum + 1) % 4 #using sharedMemory is way slower than this
-            self.weatherPlot.axvspan(self.day, self.day+10, color=self.weatherColors[self.weatherNum][1], alpha=0.5)
-            self.weatherPlot.text(self.day+5, 32, self.weatherColors[self.weatherNum][0], ha='center', va='center', fontsize=10, clip_on=True, rotation=90)
-        self.weatherPlot.set_xlim(max(0, self.day-100), self.day+1)
-        self.weatherPlot.set_ylim(min(self.plotsYs[1])-1, max(max(self.plotsYs[1]),45))
+                self.weatherNum = (self.weatherNum + 1) % 4  # using sharedMemory is way slower than this
+            self.weatherPlot.axvspan(self.day, self.day + 10, color=self.weatherColors[self.weatherNum][1], alpha=0.5)
+            self.weatherPlot.text(self.day + 5, 32, self.weatherColors[self.weatherNum][0], ha='center', va='center',
+                                  fontsize=10, clip_on=True, rotation=90)
+        self.weatherPlot.set_xlim(max(0, self.day - 100), self.day + 1)
+        self.weatherPlot.set_ylim(min(self.plotsYs[1]) - 1, max(max(self.plotsYs[1]), 45))
         plt.pause(0.05)
-
-
-        # for i, plot in enumerate(self.eventPlots.flat):
-        #     plot.set_title("I am plot for event " + str(ExternalEvent.EVENTS[i]['name']))
-        #     plot.plot([0, 1, 2, 3], [0, 1, 2, 5])
-        #     # plot.clear()
-        # plt.pause(1)
-        # self.plotsYs[0].append(self.market.price)
-        # print(self.plotsX, self.plotsYs[0])
-        # self.pricePlot.plot(self.plotsX, self.plotsYs[0])
-        # plt.pause(0.2)
-
-    # def plot(self):
-    #     marketPlt = plt.figure()
-    #     i = len(ExternalEvent.EVENTS)
-    #     plots = marketPlt.add_subplot((i+1)//3+1, 3, 1)
-    #     plotsXs = []
-    #     plotsYs = []
-    #
-    #
-    #
-    #     def animate(_, xs, ys):
-    #
-    #         # Read temperature (Celsius) from TMP102
-    #         temp_c = round(random.random(), 2)
-    #
-    #         # Add x and y to lists
-    #         xs.append(datetime.datetime.now().strftime('%H:%M:%S.%f'))
-    #         ys.append(temp_c)
-    #
-    #         # Limit x and y lists to 20 items
-    #         xs = xs[-20:]
-    #         ys = ys[-20:]
-    #
-    #         # Draw x and y lists
-    #         ax.clear()
-    #         ax.plot(xs, ys)
-    #
-    #         # Format plot
-    #         plt.xticks(rotation=45, ha='right')
-    #         plt.subplots_adjust(bottom=0.30)
-    #         plt.title('TMP102 Temperature over Time')
-    #         plt.ylabel('Temperature (deg C)')
-    #
-    #     # Set up plot to call animate() function periodically
-    #     ani = animation.FuncAnimation(marketPlt, animate, fargs=(xs, ys), interval=100)
-    #     # we're using a remote IDE on wsl, so we need to use the following line to show the plot
-    #     plt.show()
 
     def run(self):
         self.sharedWH = mp.Array('d', range(10))  # 0: Température
@@ -692,11 +610,9 @@ class Time(mp.Process):
             # wait for weather to be calculated
             self.start_new_day_barrier.wait()
             self.marketDataBarrier.wait()
-            # print(self.marketTimeParentPipe.recv(), self.sharedWH[0])
             self.animate()
             self.start_new_day_barrier.wait()
             self.startNewDay()
-            # time.sleep(1)
         print("ending time...")
         for h in self.homes:
             h.join()
@@ -706,5 +622,3 @@ class Time(mp.Process):
         self.weather.join()
         time.sleep(0.5)
         plt.show(block=True)
-        # plt.show()
-        # plt.close('all')
